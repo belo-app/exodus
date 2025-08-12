@@ -235,6 +235,7 @@ def process_verification(file_info):
     try:
         # Extract ID from filename
         verification_id = filename.split('-')[1].split('.')[0]
+        print(f"Processing ID: {verification_id}...")
     except IndexError:
         print(f"Error: Invalid filename format: {filename}")
         return {'status': 'error', 'error': 'Invalid filename format', 'filename': filename}
