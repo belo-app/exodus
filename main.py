@@ -1,6 +1,7 @@
 import os
 import json
 import boto3
+import time
 import threading
 import urllib.request
 from urllib.parse import urlparse
@@ -223,11 +224,96 @@ def download_url(url, destination_path):
         return False
 
 
-def process_verification_files():
+def process_verification(file_info):
+    """
+    Processes a single verification file and downloads associated media.
+    """
+    filename = file_info['filename']
+    origin_dir = file_info['origin_dir']
+    destination_dir = file_info['destination_dir']
+
+    try:
+        # Extract ID from filename
+        verification_id = filename.split('-')[1].split('.')[0]
+    except IndexError:
+        print(f"Error: Invalid filename format: {filename}")
+        return {'status': 'error', 'error': 'Invalid filename format', 'filename': filename}
+
+    # Create directory for this verification if it doesn't exist
+    verification_dir = os.path.join(destination_dir, verification_id)
+    if os.path.exists(verification_dir):
+        return {'status': 'skipped', 'message': f"Directory already exists for {verification_id}"}
+
+    try:
+        os.makedirs(verification_dir)
+    except Exception as e:
+        return {'status': 'error', 'error': f"Failed to create directory: {str(e)}", 'filename': filename}
+
+    # Read the JSON file
+    json_path = os.path.join(origin_dir, filename)
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        return {'status': 'error', 'error': f"Invalid JSON: {str(e)}", 'filename': filename}
+    except Exception as e:
+        return {'status': 'error', 'error': f"Failed to read file: {str(e)}", 'filename': filename}
+
+    downloads_succeeded = True
+    # Process document photos
+    if 'documents' in data:
+        for doc in data['documents']:
+            if 'photos' in doc and len(doc['photos']) >= 2:
+                if not download_url(doc['photos'][0], os.path.join(verification_dir, 'doc_front.jpg')):
+                    downloads_succeeded = False
+                if not download_url(doc['photos'][1], os.path.join(verification_dir, 'doc_back.jpg')):
+                    downloads_succeeded = False
+
+    # Process steps data
+    if 'steps' in data:
+        for step in data['steps']:
+            if 'data' in step:
+                step_data = step['data']
+
+                if 'selfieUrl' in step_data:
+                    if not download_url(step_data['selfieUrl'], os.path.join(verification_dir, 'selfie.jpg')):
+                        downloads_succeeded = False
+
+                if 'spriteUrl' in step_data:
+                    if not download_url(step_data['spriteUrl'], os.path.join(verification_dir, 'sprite.jpg')):
+                        downloads_succeeded = False
+
+                if 'videoUrl' in step_data:
+                    video_url = step_data['videoUrl']
+                    ext = os.path.splitext(urlparse(video_url).path)[
+                        1] or '.mp4'
+                    if not download_url(video_url, os.path.join(verification_dir, f'video{ext}')):
+                        downloads_succeeded = False
+
+    # Copy the JSON file as data.json (compressed)
+    try:
+        json_destination = os.path.join(verification_dir, 'data.json')
+        with open(json_path, 'r') as src, open(json_destination, 'w') as dst:
+            json.dump(json.load(src), dst, separators=(',', ':'))
+    except Exception as e:
+        return {'status': 'error', 'error': f"Failed to copy JSON file: {str(e)}", 'filename': filename}
+
+    status = 'success' if downloads_succeeded else 'partial_success'
+    return {
+        'status': status,
+        'verification_id': verification_id,
+        'filename': filename,
+        'message': 'All files processed successfully' if downloads_succeeded else 'Some downloads failed'
+    }
+
+
+def process_verification_files(processes=24):
     """
     Processes verification files from the origin directory and organizes their contents
-    in a destination directory structure.
+    in a destination directory structure using multiple processes.
     """
+    start_time = time.time()
+
     # Create destination directory if it doesn't exist
     destination_dir = "destination"
     os.makedirs(destination_dir, exist_ok=True)
@@ -238,79 +324,72 @@ def process_verification_files():
         print(f"Error: Origin directory '{origin_dir}' does not exist")
         return
 
-    # Process each verification file
+    # Collect all verification files
+    verification_files = []
     for filename in os.listdir(origin_dir):
-        if not filename.endswith('.json'):
-            continue
+        if filename.endswith('.json'):
+            verification_files.append({
+                'filename': filename,
+                'origin_dir': origin_dir,
+                'destination_dir': destination_dir
+            })
 
-        # Extract ID from filename
-        try:
-            verification_id = filename.split('-')[1].split('.')[0]
-        except IndexError:
-            print(f"Error: Invalid filename format: {filename}")
-            continue
+    if not verification_files:
+        print("No verification files found in the origin directory")
+        return
 
-        # Create directory for this verification if it doesn't exist
-        verification_dir = os.path.join(destination_dir, verification_id)
-        if os.path.exists(verification_dir):
-            print(f"Skipping {verification_id} - directory already exists")
-            continue
+    print(f"Found {len(verification_files)} verification files to process")
 
-        os.makedirs(verification_dir)
+    # Create a process pool
+    pool = multiprocessing.Pool(processes=processes)
 
-        # Read the JSON file
-        json_path = os.path.join(origin_dir, filename)
-        try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"Error: Invalid JSON in file {filename}: {str(e)}")
-            continue
-        except Exception as e:
-            print(f"Error reading file {filename}: {str(e)}")
-            continue
+    try:
+        # Process files in parallel
+        results = pool.map(process_verification, verification_files)
 
-        # Process document photos
-        if 'documents' in data:
-            for doc in data['documents']:
-                if 'photos' in doc and len(doc['photos']) >= 2:
-                    # Download front and back photos
-                    download_url(doc['photos'][0], os.path.join(
-                        verification_dir, 'doc_front.jpg'))
-                    download_url(doc['photos'][1], os.path.join(
-                        verification_dir, 'doc_back.jpg'))
+        # Close the pool
+        pool.close()
+        pool.join()
 
-        # Process steps data
-        if 'steps' in data:
-            for step in data['steps']:
-                if 'data' in step:
-                    step_data = step['data']
+        # Process results
+        success_count = 0
+        partial_success_count = 0
+        skipped_count = 0
+        error_count = 0
 
-                    # Download selfie if exists
-                    if 'selfieUrl' in step_data:
-                        download_url(step_data['selfieUrl'], os.path.join(
-                            verification_dir, 'selfie.jpg'))
+        for result in results:
+            if result['status'] == 'success':
+                success_count += 1
+                print(f"Successfully processed {result['filename']}")
+            elif result['status'] == 'partial_success':
+                partial_success_count += 1
+                print(
+                    f"Partially processed {result['filename']} (some downloads failed)")
+            elif result['status'] == 'skipped':
+                skipped_count += 1
+                print(f"Skipped {result['filename']} - {result['message']}")
+            else:  # error
+                error_count += 1
+                print(
+                    f"Error processing {result['filename']}: {result['error']}")
 
-                    # Download sprite if exists
-                    if 'spriteUrl' in step_data:
-                        download_url(step_data['spriteUrl'], os.path.join(
-                            verification_dir, 'sprite.jpg'))
+        # Print summary
+        # Calculate elapsed time
+        elapsed_time = time.time() - start_time
+        minutes = int(elapsed_time // 60)
+        seconds = int(elapsed_time % 60)
 
-                    # Download video if exists
-                    if 'videoUrl' in step_data:
-                        video_url = step_data['videoUrl']
-                        # Get extension from URL
-                        ext = os.path.splitext(urlparse(video_url).path)[
-                            1] or '.mp4'
-                        download_url(video_url, os.path.join(
-                            verification_dir, f'video{ext}'))
+        print(f"\nProcessing Summary:")
+        print(f"Successfully processed: {success_count}")
+        print(f"Partially processed: {partial_success_count}")
+        print(f"Skipped: {skipped_count}")
+        print(f"Failed: {error_count}")
+        print(f"Total time: {minutes} minutes {seconds} seconds")
 
-        # Copy the JSON file
-        json_destination = os.path.join(verification_dir, filename)
-        with open(json_path, 'r') as src, open(json_destination, 'w') as dst:
-            json.dump(json.load(src), dst, indent=2)
-
-        print(f"Processed verification {verification_id}")
+    except Exception as e:
+        print(f"Error in parallel processing: {str(e)}")
+        pool.terminate()
+        raise
 
 
 def main():
@@ -321,7 +400,7 @@ def main():
     # download_origin_files(
     #     bucket=aws_origin_bucket,
     #     prefix=aws_origin_prefix,
-    #     n=100,  # or any number you want, use -1 for all files
+    #     n=1000,  # or any number you want, use -1 for all files
     #     processes=12  # number of parallel processes
     # )
 
