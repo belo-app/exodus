@@ -1,6 +1,10 @@
 import os
+import json
 import boto3
 import threading
+import urllib.request
+from urllib.parse import urlparse
+from pathlib import Path
 from dotenv import load_dotenv
 import multiprocessing
 
@@ -207,19 +211,122 @@ def download_origin_files(bucket, prefix, n=100, processes=12):
         raise
 
 
+def download_url(url, destination_path):
+    """
+    Downloads a file from a URL to a specified path.
+    """
+    try:
+        urllib.request.urlretrieve(url, destination_path)
+        return True
+    except Exception as e:
+        print(f"Error downloading {url}: {str(e)}")
+        return False
+
+
+def process_verification_files():
+    """
+    Processes verification files from the origin directory and organizes their contents
+    in a destination directory structure.
+    """
+    # Create destination directory if it doesn't exist
+    destination_dir = "destination"
+    os.makedirs(destination_dir, exist_ok=True)
+
+    # Get all JSON files from origin directory
+    origin_dir = "origin"
+    if not os.path.exists(origin_dir):
+        print(f"Error: Origin directory '{origin_dir}' does not exist")
+        return
+
+    # Process each verification file
+    for filename in os.listdir(origin_dir):
+        if not filename.endswith('.json'):
+            continue
+
+        # Extract ID from filename
+        try:
+            verification_id = filename.split('-')[1].split('.')[0]
+        except IndexError:
+            print(f"Error: Invalid filename format: {filename}")
+            continue
+
+        # Create directory for this verification if it doesn't exist
+        verification_dir = os.path.join(destination_dir, verification_id)
+        if os.path.exists(verification_dir):
+            print(f"Skipping {verification_id} - directory already exists")
+            continue
+
+        os.makedirs(verification_dir)
+
+        # Read the JSON file
+        json_path = os.path.join(origin_dir, filename)
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in file {filename}: {str(e)}")
+            continue
+        except Exception as e:
+            print(f"Error reading file {filename}: {str(e)}")
+            continue
+
+        # Process document photos
+        if 'documents' in data:
+            for doc in data['documents']:
+                if 'photos' in doc and len(doc['photos']) >= 2:
+                    # Download front and back photos
+                    download_url(doc['photos'][0], os.path.join(
+                        verification_dir, 'doc_front.jpg'))
+                    download_url(doc['photos'][1], os.path.join(
+                        verification_dir, 'doc_back.jpg'))
+
+        # Process steps data
+        if 'steps' in data:
+            for step in data['steps']:
+                if 'data' in step:
+                    step_data = step['data']
+
+                    # Download selfie if exists
+                    if 'selfieUrl' in step_data:
+                        download_url(step_data['selfieUrl'], os.path.join(
+                            verification_dir, 'selfie.jpg'))
+
+                    # Download sprite if exists
+                    if 'spriteUrl' in step_data:
+                        download_url(step_data['spriteUrl'], os.path.join(
+                            verification_dir, 'sprite.jpg'))
+
+                    # Download video if exists
+                    if 'videoUrl' in step_data:
+                        video_url = step_data['videoUrl']
+                        # Get extension from URL
+                        ext = os.path.splitext(urlparse(video_url).path)[
+                            1] or '.mp4'
+                        download_url(video_url, os.path.join(
+                            verification_dir, f'video{ext}'))
+
+        # Copy the JSON file
+        json_destination = os.path.join(verification_dir, filename)
+        with open(json_path, 'r') as src, open(json_destination, 'w') as dst:
+            json.dump(json.load(src), dst, indent=2)
+
+        print(f"Processed verification {verification_id}")
+
+
 def main():
-    # Migration buckets (get from environment)
     aws_origin_bucket = os.getenv('AWS_ORIGIN_BUCKET')
-    # Default to empty string if not set
     aws_origin_prefix = os.getenv('AWS_ORIGIN_PREFIX')
 
-    # Download files from origin bucket
-    download_origin_files(
-        bucket=aws_origin_bucket,
-        prefix=aws_origin_prefix,
-        n=100,  # or any number you want, use -1 for all files
-        processes=12  # number of parallel processes
-    )
+    # Download files from origin bucket if needed
+    # download_origin_files(
+    #     bucket=aws_origin_bucket,
+    #     prefix=aws_origin_prefix,
+    #     n=100,  # or any number you want, use -1 for all files
+    #     processes=12  # number of parallel processes
+    # )
+
+    # Process verification files
+    process_verification_files()
 
 
 if __name__ == "__main__":
