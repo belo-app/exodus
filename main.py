@@ -264,11 +264,17 @@ def process_verification(file_info):
     # Process document photos
     if 'documents' in data:
         for doc in data['documents']:
-            if 'photos' in doc and len(doc['photos']) >= 2:
-                if not download_url(doc['photos'][0], os.path.join(verification_dir, 'doc_front.jpg')):
-                    downloads_succeeded = False
-                if not download_url(doc['photos'][1], os.path.join(verification_dir, 'doc_back.jpg')):
-                    downloads_succeeded = False
+            # Check if photos array exists and is not empty
+            if 'photos' in doc and doc['photos']:
+                # Handle front photo if available
+                if len(doc['photos']) >= 1:
+                    if not download_url(doc['photos'][0], os.path.join(verification_dir, 'doc_front.jpg')):
+                        downloads_succeeded = False
+
+                # Handle back photo if available
+                if len(doc['photos']) >= 2:
+                    if not download_url(doc['photos'][1], os.path.join(verification_dir, 'doc_back.jpg')):
+                        downloads_succeeded = False
 
     # Process steps data
     if 'steps' in data:
